@@ -1,0 +1,11 @@
+# Compiled executables
+minish
+a.out
+*.exe
+*.out
+
+# Object and library files
+*.o
+*.obj
+*.so
+*.a
