@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define MINISH_TOK_BUFSIZE 64
 #define MINISH_TOK_DELIM " \t\r\n\a"
@@ -42,6 +45,31 @@ char **minish_split_line(char *line) {
     return tokens;
 }
 
+int minish_launch(char **args) {
+    pid_t pid = fork(); // fork() creates a child process. a process is a running instance of a program.
+
+    if (pid == 0) {
+        // child process: run the requested program.
+	execvp(args[0], args);
+	perror(args[0]);
+	_exit(EXIT_FAILURE);
+    } else if (pid < 0) {
+	// the shell could not create a child.
+	perror("minish: fork");
+    } else {
+	// parent process: wait for this child to finish.
+	while (waitpid(pid, NULL, 0) == -1) {
+	    if (errno != EINTR) { 
+                perror("minish: waitpid");
+		break;
+	    }
+	}
+    }
+
+    return 1;
+
+}
+
 int main(void) {
     char *line = NULL;
     size_t capacity = 0;
@@ -56,8 +84,8 @@ int main(void) {
 
 	char **args = minish_split_line(line);
 
-	for (int i = 0; args[i] != NULL; i++) {
-	    printf("args[%d] = %s\n", i, args[i]);
+	if (args[0] != NULL) {
+	    minish_launch(args);
 	}
 
 	free(args);
