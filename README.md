@@ -5,17 +5,20 @@ pipes and file descriptors, and signals directly rather than through abstraction
 
 ## resouces used
 
-currently following the tutorial by Stephan Brennan called, "Write a Shell in C"
+currently following the tutorial by Stephen Brennan called [Write a Shell in C](https://brennan.io/2015/01/16/write-a-shell-in-c/).
 
 ## how to run it yourself
 
 compile the program by running, 'cc -Wall -Wextra main.c -o minish'
 then run the program using, './minish'
 
+## current features
+
+- can run external commands with arguments (fork, execvp, waitpid)
+- supports built-in commands (cd, exit, pwd)
+
 ## goals for the future
 
-- run external commands with arguments (fork, execvp, waitpid)
-- support built-in commands (cd, exit, pwd)
 - support input and output directions (<, >, >>)
 - support pipelines of any length (cmd1 | cmd2 | cmd3)
 - handle Ctrl+C so it interrups the running command and not the shell
