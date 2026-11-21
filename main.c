@@ -17,7 +17,7 @@ char **minish_split_line(char *line) {
 
     if (tokens == NULL) {
         perror("minish");
-	exit(EXIT_FAILURE);
+	    exit(EXIT_FAILURE);
     }
     
     // returns a pointer to the first token in the string.
@@ -25,20 +25,20 @@ char **minish_split_line(char *line) {
     while (token != NULL) {
         tokens[position++] = token;
         
-	// dynamically, expand the size of the buffer if position exceeds it.
-	if (position >= bufsize) {
-	    bufsize += MINISH_TOK_BUFSIZE;
-	    char **grown = realloc(tokens, bufsize * sizeof *tokens);
-	    if (grown == NULL) {
-	        free(tokens);
-		perror("minish");
-		exit(EXIT_FAILURE);
+	    // dynamically, expand the size of the buffer if position exceeds it.
+	    if (position >= bufsize) {
+	        bufsize += MINISH_TOK_BUFSIZE;
+	        char **grown = realloc(tokens, bufsize * sizeof *tokens);
+	        if (grown == NULL) {
+	            free(tokens);
+		        perror("minish");
+		        exit(EXIT_FAILURE);
+	        }
+	        tokens = grown;
 	    }
-	    tokens = grown;
-	}
         
-	// repeat the process until no token is returned by strtok.
-	token = strtok(NULL, MINISH_TOK_DELIM);
+	    // repeat the process until no token is returned by strtok.
+	    token = strtok(NULL, MINISH_TOK_DELIM);
     }
 
     tokens[position] = NULL;
@@ -50,20 +50,20 @@ int minish_launch(char **args) {
 
     if (pid == 0) {
         // child process: run the requested program.
-	execvp(args[0], args);
-	perror(args[0]);
-	_exit(EXIT_FAILURE);
+	    execvp(args[0], args);
+	    perror(args[0]);
+	    _exit(EXIT_FAILURE);
     } else if (pid < 0) {
-	// the shell could not create a child.
-	perror("minish: fork");
+	    // the shell could not create a child.
+	    perror("minish: fork");
     } else {
-	// parent process: wait for this child to finish.
-	while (waitpid(pid, NULL, 0) == -1) {
-	    if (errno != EINTR) { 
+	    // parent process: wait for this child to finish.
+	    while (waitpid(pid, NULL, 0) == -1) {
+	        if (errno != EINTR) { 
                 perror("minish: waitpid");
-		break;
+		        break;
+	        }
 	    }
-	}
     }
 
     return 1;
@@ -76,26 +76,26 @@ int main(void) {
 
     while(1) {
         printf("minish>");
-	fflush(stdout);
+	    fflush(stdout);
 
-	if (getline(&line, &capacity, stdin) == -1) {
-	    break;
-	}
+	    if (getline(&line, &capacity, stdin) == -1) {
+	        break;
+	    }   
 
-	char **args = minish_split_line(line);
+	    char **args = minish_split_line(line);
 
-	if (args[0] != NULL) {
-	    minish_launch(args);
-	}
+	    if (args[0] != NULL) {
+	        minish_launch(args);
+	    }
 
-	free(args);
+	    free(args);
     }
 
     free(line);
 
     if (ferror(stdin)) {
         perror("minish");
-	return 1;
+	    return 1;
     }
 
     return 0;
