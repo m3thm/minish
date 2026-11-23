@@ -3,9 +3,10 @@
 this is a small unix shell that I am writing to understand how unix runs and connect programs, using processes, 
 pipes and file descriptors, and signals directly rather than through abstractions. 
 
-## resouces used
+## resources used
 
-currently following the tutorial by Stephen Brennan called [Write a Shell in C](https://brennan.io/2015/01/16/write-a-shell-in-c/).
+- [Write a Shell in C](https://brennan.io/2015/01/16/write-a-shell-in-c/) by Stephen Brennan.
+- operating systems - three easy pieces, chapter 5.
 
 ## how to run it yourself
 
