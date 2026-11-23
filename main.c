@@ -9,6 +9,16 @@
 #define MINISH_TOK_BUFSIZE 64
 #define MINISH_TOK_DELIM " \t\r\n\a"
 
+struct minish_redirect {
+    char *infile;   // file after '<', or NULL if none
+    char *outfile;  // file after '>' or '>>', or NULL if none
+    int append;     // 1 if '>>', 0 if '>'
+};
+
+static int minish_is_operator(const char *tok) {
+    return strcmp(tok, "<") == 0 || strcmp(tok, ">") == 0 || strcmp(tok, ">>") == 0;
+}
+
 char **minish_split_line(char *line) {
     int bufsize = MINISH_TOK_BUFSIZE;
     int position = 0;
