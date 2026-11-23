@@ -124,6 +124,39 @@ int minish_exit(char **args) {
     return 0; // tell the shell loop to stop.
 }
 
+int minish_parse_redirects(char **args, struct minish_redirect *r) {
+    r->infile = NULL;
+    r->outfile = NULL;
+    r->append = 0;
+
+    int j = 0; // where the next kept token goes
+    for (int i = 0; args[i] != NULL; i++) {
+        if (minish_is_operator(args[i])) {
+            char *target = args[i + 1];
+
+            // there must be a filename, and it must not be another operator.
+            if (target == NULL || minish_is_operator(target)) {
+                fprintf(stderr, "minish syntax error: expected a filename after '%s'\n", args[i]);
+                return -1;
+            }
+
+            if (strcmp(args[i], "<") == 0) {
+                r->infile = target;
+            } else {
+                r->outfile = target;
+                r->append = (strcmp(args[i], ">>") == 0);
+            }
+
+            i++; // also skip the filename token
+        } else {
+            args[j++] = args[i]; // keep this token
+        }
+    }
+
+    args[j] = NULL; // re-terminate the shortened list
+    return 0;    
+}
+
 int minish_execute(char **args) {
     if (args[0] == NULL) {
         return 1; // empty line. show another prompt.
