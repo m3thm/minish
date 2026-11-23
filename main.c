@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define MINISH_TOK_BUFSIZE 64
 #define MINISH_TOK_DELIM " \t\r\n\a"
@@ -55,10 +56,34 @@ char **minish_split_line(char *line) {
     return tokens;
 }
 
-int minish_launch(char **args) {
+void minish_redirect_fd(const char *path, int flags, int target_fd) {
+    // opens or creates a file at the specified path according to the specified flags (O_WRONLY | O_CREAT | O_TRUNC)
+    // if a new file is created, 0644 sets the permissions of it to read/write for the owner, read-only for everyone else.
+    int fd = open(path, flags, 0644);
+    if (fd == -1) {
+        perror(path);
+        _exit(EXIT_FAILURE);
+    }
+    if (dup2(fd, target_fd) == -1) {
+        perror("minish: dup2");
+        _exit(EXIT_FAILURE);
+    }
+    close(fd);
+}
+
+int minish_launch(char **args, struct minish_redirect *r) {
     pid_t pid = fork(); // fork() creates a child process. a process is a running instance of a program.
 
     if (pid == 0) {
+        // child: set up redirections BEFORE exec.
+        if (r->infile != NULL) {
+            minish_redirect_fd(r->infile, O_RDONLY, STDIN_FILENO);
+        }
+        if (r->outfile != NULL) {
+            int flags = O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
+            minish_redirect_fd(r->outfile, flags, STDOUT_FILENO);
+        }
+
         // child process: run the requested program.
 	    execvp(args[0], args);
 	    perror(args[0]);
@@ -162,13 +187,23 @@ int minish_execute(char **args) {
         return 1; // empty line. show another prompt.
     }
 
+    struct minish_redirect redir;
+    if (minish_parse_redirects(args, &redir) == -1) {
+        return 1; // syntax error already printed; show another prompt.
+    }
+
+    if (args[0] == NULL) { // e.g. the user typed only "> out.txt"
+        fprintf(stderr, "minish: missing command\n");
+        return 1;
+    }
+
     for (size_t i = 0; i < minish_num_builtins(); i++) {
         if (strcmp(args[0], builtin_names[i]) == 0) { // the names match
             return builtin_functions[i](args); // call the matching builtin.
         }
     }
 
-    return minish_launch(args); // treat any other name as an external program.
+    return minish_launch(args, &redir); // treat any other name as an external program.
 }
 
 int main(void) {
