@@ -7,6 +7,7 @@ pipes and file descriptors, and signals directly rather than through abstraction
 
 - [Write a Shell in C](https://brennan.io/2015/01/16/write-a-shell-in-c/) by Stephen Brennan.
 - operating systems - three easy pieces, chapter 5.
+- xv6: a simple, Unix-like teaching operating system, chapter 1
 
 ## how to run it yourself
 
