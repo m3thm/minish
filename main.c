@@ -58,7 +58,7 @@ char **minish_split_line(char *line) {
 
 // splits args at each "|" and returns an array of commands (each one a char **).
 // *count gets the number of commands. caller frees the returned array.
-char **minish_split_pipeline(char **args, int *count) {
+char ***minish_split_pipeline(char **args, int *count) {
     int n = 1;
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "|") == 0) {
@@ -76,7 +76,7 @@ char **minish_split_pipeline(char **args, int *count) {
     cmds[k++] = args;
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "|") == 0) {
-            args[i] == NULL; // end the previous command here 
+            args[i] = NULL; // end the previous command here 
             cmds[k++] = &args[i + 1]; // next command starts after the pipe
         }
     }
@@ -102,7 +102,7 @@ void minish_redirect_fd(const char *path, int flags, int target_fd) {
 
 static void minish_apply_redirects(const struct minish_redirect *r) {
     if (r->infile != NULL) {
-        minish_redirect_fd(r->infile, O_RDONLY, STDIN_FILENO);;
+        minish_redirect_fd(r->infile, O_RDONLY, STDIN_FILENO);
     }
     if (r->outfile != NULL) {
         int flags = O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
@@ -354,7 +354,7 @@ int main(void) {
     char *line = NULL;
     size_t capacity = 0;
     while(1) {
-        printf("minish>");
+        printf("minish> ");
 	    fflush(stdout);
 
 	    if (getline(&line, &capacity, stdin) == -1) {
