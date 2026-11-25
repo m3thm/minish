@@ -18,9 +18,9 @@ then run the program using, './minish'
 - can run external commands with arguments (fork, execvp, waitpid)
 - supports built-in commands (cd, exit, pwd)
 - support input and output directions (<, >, >>)
+- support pipelines of any length (cmd1 | cmd2 | cmd3)
 
 ## goals for the future
 
-- support pipelines of any length (cmd1 | cmd2 | cmd3)
 - handle Ctrl+C so it interrups the running command and not the shell
 - run background jobs with & and reap finished children.

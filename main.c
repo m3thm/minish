@@ -1,15 +1,19 @@
-#define _POSIX_C_SOURCE 200809L
-#include <fcntl.h>
+#define _POSIX_C_SOURCE 200809L // ask for the standard unix (POSIX) features, e.g. getline and strtok.
+#include <fcntl.h> // open() and the O_RDONLY / O_WRONLY / ... flags
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <sys/wait.h> // waitpid
+#include <unistd.h> // fork, execvp, pipe, dup2, close, chdir
 
-#define MINISH_TOK_BUFSIZE 64
+// the word list starts with room for 64 words and grows by 64 when full.
+#define MINISH_TOK_BUFSIZE 64 
+// characters that separate words: space, tab, carriage return, newline, bell.
 #define MINISH_TOK_DELIM " \t\r\n\a"
 
+ // remembers the redirections ( < > >> ) of ONE command.
+ // example: for "sort < in.txt > out.txt" : infile = "in.txt", outfile = "out.txt", append = 0 
 struct minish_redirect {
     char *infile;   // file after '<', or NULL if none
     char *outfile;  // file after '>' or '>>', or NULL if none
@@ -20,9 +24,12 @@ static int minish_is_operator(const char *tok) {
     return strcmp(tok, "<") == 0 || strcmp(tok, ">") == 0 || strcmp(tok, ">>") == 0;
 }
 
+// turn one line of text into a list of words. example: "ls -l /home" becomes: ["ls", "-l", "/home", NULL]
+// the list ends with NULL so other code (like execvp) knows where it stops.
 char **minish_split_line(char *line) {
     int bufsize = MINISH_TOK_BUFSIZE;
     int position = 0;
+    // char ** = "a list of strings". reserve room for bufsize pointers.
     char **tokens = malloc(bufsize * sizeof *tokens);
     char *token;
 
@@ -39,6 +46,8 @@ char **minish_split_line(char *line) {
 	    // dynamically, expand the size of the buffer if position exceeds it.
 	    if (position >= bufsize) {
 	        bufsize += MINISH_TOK_BUFSIZE;
+            // save realloc's answer in a temporary variable first. 
+            // if it fails it returns NULL, and we still need the old pointer to free it.
 	        char **grown = realloc(tokens, bufsize * sizeof *tokens);
 	        if (grown == NULL) {
 	            free(tokens);
@@ -56,8 +65,25 @@ char **minish_split_line(char *line) {
     return tokens;
 }
 
-// splits args at each "|" and returns an array of commands (each one a char **).
-// *count gets the number of commands. caller frees the returned array.
+/*
+ * cut the word list into separate commands at each "|".
+ * example: the user typed "cat a.txt | sort | uniq", so args is: [cat, a.txt, |, sort, |, uniq, NULL]
+ *
+ * we overwrite each "|" with NULL, which ends the command before it:
+ *    [cat, a.txt, NULL, sort, NULL, uniq, NULL]
+ *     ^cmds[0]          ^cmds[1]   ^cmds[2]
+ *
+ * cmds[k] is a pointer to where command k starts. each command is now its
+ * own NULL-terminated list, which is exactly what execvp wants.
+ * nothing is copied. we only mark where each command begins.
+ *
+ * the return type is char ***, read as "an array of (lists of strings)".
+ *   char *    one string
+ *   char **   a list of strings (one command)
+ *   char ***  a list of commands
+ *
+ * *count is set to the number of commands. the caller must free the result.
+ */
 char ***minish_split_pipeline(char **args, int *count) {
     int n = 1;
     for (int i = 0; args[i] != NULL; i++) {
@@ -65,7 +91,8 @@ char ***minish_split_pipeline(char **args, int *count) {
             n++;
         }
     }
-
+    
+    // now we know the exact size needed, so there's no limit on length.
     char ***cmds = malloc(n * sizeof *cmds);
     if (cmds == NULL) {
         perror("minish");
@@ -73,7 +100,7 @@ char ***minish_split_pipeline(char **args, int *count) {
     }
 
     int k = 0;
-    cmds[k++] = args;
+    cmds[k++] = args; // the first command starts at the beginning.
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "|") == 0) {
             args[i] = NULL; // end the previous command here 
@@ -85,6 +112,23 @@ char ***minish_split_pipeline(char **args, int *count) {
     return cmds;
 }
 
+/*
+ * redirection helper: make one of our standard fds point at a file.
+ *
+ * background: every process has numbered "file descriptors" (fds):
+ *   0 = stdin (input), 1 = stdout (output), 2 = stderr (errors).
+ * programs read from fd 0 and write to fd 1 without knowing what they are
+ * connected to. if we change what fd 1 points to, the program writes into
+ * a file and never notices.
+ *
+ *   path      the file to open
+ *   flags     how to open it (read, write, create, append, ...)
+ *   target_fd the fd to rewire (0 for input, 1 for output)
+ *
+ * this only runs inside a CHILD process (see minish_launch), so if
+ * something fails we exit the child with _exit instead of returning.
+ * otherwise the command would run without its redirection.
+ */
 void minish_redirect_fd(const char *path, int flags, int target_fd) {
     // opens or creates a file at the specified path according to the specified flags (O_WRONLY | O_CREAT | O_TRUNC)
     // if a new file is created, 0644 sets the permissions of it to read/write for the owner, read-only for everyone else.
@@ -93,23 +137,42 @@ void minish_redirect_fd(const char *path, int flags, int target_fd) {
         perror(path);
         _exit(EXIT_FAILURE);
     }
+
+    // dup2(fd, target_fd): make target_fd point to the same file as fd.
+    // if target_fd was already open (like the terminal), it is closed first.
     if (dup2(fd, target_fd) == -1) {
         perror("minish: dup2");
         _exit(EXIT_FAILURE);
     }
+
+    // target_fd now has its own link to the file, so the original fd is just an extra copy. close it so we don't leak it.
     close(fd);
 }
 
+// applies one command's redirections. call this in the child, before exec.
 static void minish_apply_redirects(const struct minish_redirect *r) {
+    // "cmd < file": read input from the file instead of the keyboard.
     if (r->infile != NULL) {
         minish_redirect_fd(r->infile, O_RDONLY, STDIN_FILENO);
     }
+
+    // "cmd > file" or "cmd >> file": send output to the file.
     if (r->outfile != NULL) {
+        // O_WRONLY  open for writing only
+        // O_CREAT   create the file if it does not exist then one of:
+        // O_APPEND  ">>"  new output goes at the end of the file
+        // O_TRUNC   ">"   wipe the file first, then write
         int flags = O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
         minish_redirect_fd(r->outfile, flags, STDOUT_FILENO);
     }
 }
 
+/*
+ * wait for one child process to finish.
+ * waitpid returns -1 on a problem. EINTR just means "a signal interrupted
+ * the wait", which is not a real error, so we try again. any other error
+ * is printed and we give up waiting.
+ */
 static void minish_wait(pid_t pid) {
     while (waitpid(pid, NULL, 0) == -1) {
         if (errno != EINTR) {
@@ -119,14 +182,22 @@ static void minish_wait(pid_t pid) {
     }
 }
 
+// run ONE external program (like ls), with optional redirection.
+// fork (clone the shell), turn the clone into the new program with execvp, and have the original shell wait for it to finish.
+// returns 1, meaning "keep the shell running."
 int minish_launch(char **args, struct minish_redirect *r) {
-    pid_t pid = fork(); // fork() creates a child process. a process is a running instance of a program.
-
+    // fork() copies the running shell. afterwards there are TWO processes running this same code, and fork returns a different value in each:
+    //   child  -> 0
+    //   parent -> the child's process id (a positive number)
+    //   error  -> -1 (no child was made)
+    pid_t pid = fork();
     if (pid == 0) {
-        // child: set up redirections BEFORE exec.
+        // we are the CHILD. rewire stdin/stdout BEFORE exec. we do it in the child so the shell's own stdin/stdout stay untouched. 
+        // rewired fds survive execvp, so the new program inherits them.
         minish_apply_redirects(r);
 
-        // child process: run the requested program.
+        // execvp REPLACES this process with the named program, searching the PATH. if it works it never returns, because this process is
+        // now "ls" (or whatever). the lines below only run if it FAILED, for example when the command does not exist.
 	    execvp(args[0], args);
 	    perror(args[0]);
 	    _exit(EXIT_FAILURE);
@@ -141,6 +212,11 @@ int minish_launch(char **args, struct minish_redirect *r) {
     return 1;
 
 }
+
+/*
+* builtins are commands the shell runs ITSELF instead of launching a program. 
+* cd and exit must work this way because they change the shell: a child process that did "cd" would change only itself, then vanish.
+*/
 
 // function declarations for builtin shell commands
 int minish_cd(char **args);
@@ -195,6 +271,28 @@ int minish_exit(char **args) {
     return 0; // tell the shell loop to stop.
 }
 
+/*
+* run several commands connected by pipes.
+*
+* what is a pipe? pipe(fd) makes a hidden in-memory channel with TWO ends: fd[0] = the READ end, fd[1] = the WRITE end.
+* whatever goes into the write end comes out of the read end.
+*
+*   ls | wc :    ls --writes--> [ pipe ] --reads--> wc
+*
+* so we make ls's stdout the write end and wc's stdin the read end, using dup2 just like we did for files.
+*
+* for N commands we need N-1 pipes:  A --pipe1--> B --pipe2--> C
+*
+* we handle one command per loop pass. "prev_read" holds the read end of the pipe that the PREVIOUS command writes into, 
+* so the current command can read from it (-1 means "none", as for the first command).
+*
+* every process must close the pipe ends it does not use. a reader only sees "end of input" once
+* EVERY copy of the write end is closed. if any process keeps one open by mistake, the reader waits forever and the shell hangs.
+*
+*   cmds    the commands (from minish_split_pipeline)
+*   redirs  redirections for each command (same order as cmds)
+*   n       number of commands
+*/
 int minish_run_pipeline(char ***cmds, struct minish_redirect *redirs, int n) {
     pid_t *pids = malloc(n * sizeof *pids);
     if (pids == NULL) {
@@ -272,6 +370,19 @@ int minish_run_pipeline(char ***cmds, struct minish_redirect *redirs, int n) {
     return 1;
 }
 
+/*
+* redirection parsing: find < > >> in ONE command, remember them, and remove them from the word list.
+*
+* example: ["sort", "<", "in.txt", "-r", NULL] -> r->infile = "in.txt" and then the list becomes ["sort", "-r", NULL]
+* so execvp only sees the real command and its real arguments.
+*
+* we use two positions in the list:
+*   i = the word we are READING
+*   j = where the next word we KEEP is written
+* j never gets ahead of i, so we only overwrite words already looked at.
+*
+* returns 0 on success, -1 on a syntax error (like "ls >" with no file).
+*/
 int minish_parse_redirects(char **args, struct minish_redirect *r) {
     r->infile = NULL;
     r->outfile = NULL;
@@ -305,14 +416,27 @@ int minish_parse_redirects(char **args, struct minish_redirect *r) {
     return 0;    
 }
 
+/*
+* decide how to run what the user typed.
+*
+*   1. cut the words into commands at each "|"
+*   2. pull out redirections for every command, and check for mistakes
+*   3. run it:
+*        one command, builtin   -> run inside the shell
+*        one command, program   -> fork + exec
+*        several commands       -> run a pipeline
+*
+* returns 1 to keep the shell running, 0 to stop it (the "exit" builtin).
+*/
 int minish_execute(char **args) {
     if (args[0] == NULL) {
         return 1; // empty line.
     }
 
-    int n = 0;
+    int n = 0; // number of commands
     char ***cmds = minish_split_pipeline(args, &n);
 
+    // one redirect record per command
     struct minish_redirect *redirs = malloc(n * sizeof *redirs);
     if (redirs == NULL) {
         perror("minish");
@@ -330,11 +454,12 @@ int minish_execute(char **args) {
         }
     }
 
-    int result = 1;
+    int result = 1; // default: keep the shell running
     if (ok) {
         if (n == 1) {
-            // no pipes: same behaviour as before.
+            // a single command. a builtin must run inside the shell itself, or "cd" and "exit" would have no effect.
             int b = minish_find_builtin(cmds[0][0]);
+
             if (b >= 0) {
                 result = builtin_functions[b](cmds[0]);
             } else {
@@ -345,33 +470,42 @@ int minish_execute(char **args) {
         }
     }
 
+    // cmds and redirs only hold pointers into args/line, so freeing these two arrays is enough. main frees args and line.
     free(redirs);
     free(cmds);
     return result;
 }
 
 int main(void) {
-    char *line = NULL;
-    size_t capacity = 0;
+    char *line = NULL; // the text the user typed. getline allocates it.
+    size_t capacity = 0; // how big line's buffer is. getline updates it.
+
     while(1) {
+        // 1. prompt. fflush forces it to appear NOW. without it the text can sit in a buffer, because there is no newline at the end.
         printf("minish> ");
 	    fflush(stdout);
 
+        // 2. read a line. getline returns -1 when there is nothing more to read, for example when the user presses Ctrl+D. 
+        // the & passes the ADDRESSES of line and capacity so getline can update them.
 	    if (getline(&line, &capacity, stdin) == -1) {
 	        break;
 	    }   
 
+        // 3. split into words. 
+        // 4. run. then free the word LIST (the words themselves live inside line, which is freed once at the very end).
 	    char **args = minish_split_line(line);
         int keep_running = minish_execute(args);
         free(args);
 
+        // the "exit" builtin makes minish_execute return 0.
 	    if (keep_running == 0) {
             break;
         }
     }
 
     free(line);
-
+    
+    // we may have left the loop because of a read error, not a normal Ctrl+D.
     if (ferror(stdin)) {
         perror("minish");
 	    return 1;
