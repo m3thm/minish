@@ -56,6 +56,35 @@ char **minish_split_line(char *line) {
     return tokens;
 }
 
+// splits args at each "|" and returns an array of commands (each one a char **).
+// *count gets the number of commands. caller frees the returned array.
+char **minish_split_pipeline(char **args, int *count) {
+    int n = 1;
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            n++;
+        }
+    }
+
+    char ***cmds = malloc(n * sizeof *cmds);
+    if (cmds == NULL) {
+        perror("minish");
+        exit(EXIT_FAILURE);
+    }
+
+    int k = 0;
+    cmds[k++] = args;
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            args[i] == NULL; // end the previous command here 
+            cmds[k++] = &args[i + 1]; // next command starts after the pipe
+        }
+    }
+
+    *count = n;
+    return cmds;
+}
+
 void minish_redirect_fd(const char *path, int flags, int target_fd) {
     // opens or creates a file at the specified path according to the specified flags (O_WRONLY | O_CREAT | O_TRUNC)
     // if a new file is created, 0644 sets the permissions of it to read/write for the owner, read-only for everyone else.
@@ -166,6 +195,83 @@ int minish_exit(char **args) {
     return 0; // tell the shell loop to stop.
 }
 
+int minish_run_pipeline(char ***cmds, struct minish_redirect *redirs, int n) {
+    pid_t *pids = malloc(n * sizeof *pids);
+    if (pids == NULL) {
+        perror("minish");
+        exit(EXIT_FAILURE);
+    }
+
+    int started = 0; // how many children we actually forked
+    int prev_read = -1; // read end of the previous pipe, or -1 for none
+
+    for (int k = 0; k < n; k++) {
+        int fd[2] = {-1, -1};
+
+        // every command except the last gets a pipe to the next one.
+        if (k < n - 1 && pipe(fd) == -1) {
+            perror("minish: pipe");
+            break;
+        }
+
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            // child: connect stdin/stdout to the neighbouring pipes.
+            if (prev_read != -1 && dup2(prev_read, STDIN_FILENO) == -1) {
+                perror("minish: dup2");
+                _exit(EXIT_FAILURE);
+            }
+            if (fd[1] != -1 && dup2(fd[1], STDOUT_FILENO) == -1) {
+                perror("minish: dup2");
+                _exit(EXIT_FAILURE);
+            }
+
+            // close every pipe fd. the dup2 copies on 0 and 1 stays open.
+            if (prev_read != -1) close(prev_read);
+            if (fd[0] != -1) close(fd[0]);
+            if (fd[1] != -1) close(fd[1]);
+
+            // explicit < and > override the pipe (as in the real shells)
+            minish_apply_redirects(&redirs[k]);
+
+            // builtins in a pipeline run in the child, then exit.
+            int b = minish_find_builtin(cmds[k][0]);
+            if (b >= 0) {
+                builtin_functions[b](cmds[k]);
+                fflush(stdout);
+                _exit(EXIT_SUCCESS);
+            }
+
+            execvp(cmds[k][0], cmds[k]);
+            perror(cmds[k][0]);
+            _exit(EXIT_FAILURE);
+        } else if (pid < 0) {
+            perror("minish: fork");
+            if (fd[0] != -1) close(fd[0]);
+            if (fd[1] != -1) close(fd[1]);
+            break;
+        }
+
+        pids[started++] = pid;
+
+        // parent: it never uses these ends itself. so close them.
+        if (prev_read != -1) close(prev_read);
+        if (fd[1] != -1) close(fd[1]);
+        prev_read = fd[0]; // the next command reads from here
+    }
+    
+    // only still open if we broke out of the loop early.
+    if (prev_read != -1) close(prev_read);
+
+    for (int i = 0; i < started; i++) {
+            minish_wait(pids[i]);
+    }
+
+    free(pids);
+    return 1;
+}
+
 int minish_parse_redirects(char **args, struct minish_redirect *r) {
     r->infile = NULL;
     r->outfile = NULL;
@@ -201,26 +307,47 @@ int minish_parse_redirects(char **args, struct minish_redirect *r) {
 
 int minish_execute(char **args) {
     if (args[0] == NULL) {
-        return 1; // empty line. show another prompt.
+        return 1; // empty line.
     }
 
-    struct minish_redirect redir;
-    if (minish_parse_redirects(args, &redir) == -1) {
-        return 1; // syntax error already printed; show another prompt.
+    int n = 0;
+    char ***cmds = minish_split_pipeline(args, &n);
+
+    struct minish_redirect *redirs = malloc(n * sizeof *redirs);
+    if (redirs == NULL) {
+        perror("minish");
+        exit(EXIT_FAILURE);
     }
 
-    if (args[0] == NULL) { // e.g. the user typed only "> out.txt"
-        fprintf(stderr, "minish: missing command\n");
-        return 1;
-    }
-
-    for (size_t i = 0; i < minish_num_builtins(); i++) {
-        if (strcmp(args[0], builtin_names[i]) == 0) { // the names match
-            return builtin_functions[i](args); // call the matching builtin.
+    // parse and validate every command BEFORE running anything.
+    int ok = 1;
+    for (int k = 0; k < n && ok; k++) {
+        if (minish_parse_redirects(cmds[k], &redirs[k]) == -1) {
+            ok = 0; // syntax error already printed.
+        } else if (cmds[k][0] == NULL) {
+            fprintf(stderr, "minish: missing command\n");
+            ok = 0;
         }
     }
 
-    return minish_launch(args, &redir); // treat any other name as an external program.
+    int result = 1;
+    if (ok) {
+        if (n == 1) {
+            // no pipes: same behaviour as before.
+            int b = minish_find_builtin(cmds[0][0]);
+            if (b >= 0) {
+                result = builtin_functions[b](cmds[0]);
+            } else {
+                result = minish_launch(cmds[0], &redirs[0]);
+            }
+        } else {
+            result = minish_run_pipeline(cmds, redirs, n);
+        }
+    }
+
+    free(redirs);
+    free(cmds);
+    return result;
 }
 
 int main(void) {
