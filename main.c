@@ -1,11 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 #define MINISH_TOK_BUFSIZE 64
 #define MINISH_TOK_DELIM " \t\r\n\a"
@@ -71,18 +71,31 @@ void minish_redirect_fd(const char *path, int flags, int target_fd) {
     close(fd);
 }
 
+static void minish_apply_redirects(const struct minish_redirect *r) {
+    if (r->infile != NULL) {
+        minish_redirect_fd(r->infile, O_RDONLY, STDIN_FILENO);;
+    }
+    if (r->outfile != NULL) {
+        int flags = O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
+        minish_redirect_fd(r->outfile, flags, STDOUT_FILENO);
+    }
+}
+
+static void minish_wait(pid_t pid) {
+    while (waitpid(pid, NULL, 0) == -1) {
+        if (errno != EINTR) {
+            perror("minish: waitpid");
+            break;
+        }
+    }
+}
+
 int minish_launch(char **args, struct minish_redirect *r) {
     pid_t pid = fork(); // fork() creates a child process. a process is a running instance of a program.
 
     if (pid == 0) {
         // child: set up redirections BEFORE exec.
-        if (r->infile != NULL) {
-            minish_redirect_fd(r->infile, O_RDONLY, STDIN_FILENO);
-        }
-        if (r->outfile != NULL) {
-            int flags = O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
-            minish_redirect_fd(r->outfile, flags, STDOUT_FILENO);
-        }
+        minish_apply_redirects(r);
 
         // child process: run the requested program.
 	    execvp(args[0], args);
@@ -93,12 +106,7 @@ int minish_launch(char **args, struct minish_redirect *r) {
 	    perror("minish: fork");
     } else {
 	    // parent process: wait for this child to finish.
-	    while (waitpid(pid, NULL, 0) == -1) {
-	        if (errno != EINTR) { 
-                perror("minish: waitpid");
-		        break;
-	        }
-	    }
+	    minish_wait(pid);
     }
 
     return 1;
@@ -122,6 +130,15 @@ int (*builtin_functions[])(char **) = {
 
 size_t minish_num_builtins(void) {
     return sizeof builtin_names / sizeof builtin_names[0];
+}
+
+static int minish_find_builtin(const char *name) {
+    for (size_t i = 0; i < minish_num_builtins(); i++) {
+        if (strcmp(name, builtin_names[i]) == 0) {
+            return (int)i;
+        }
+    }
+    return -1; // not a builtin
 }
 
 int minish_cd(char **args) {
